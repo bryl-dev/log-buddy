@@ -1,0 +1,40 @@
+{
+  "name": "log-buddy",
+  "displayName": "LogBuddy - Explain Terminal Errors",
+  "description": "Watches terminal output and explains errors in natural language.",
+  "version": "0.0.1",
+  "publisher": "your-name-or-handle",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "enabledApiProposals": [
+    "terminalDataWriteEvent"
+  ],
+  "categories": ["Other"],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:logBuddy.explainLastRun"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "logBuddy.explainLastRun",
+        "title": "LogBuddy: Explain Last Terminal Run"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package",
+    "test": "echo \"No tests yet\""
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.0.0",
+    "typescript": "^5.0.0"
+  }
+}
