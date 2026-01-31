@@ -13,7 +13,8 @@
   "categories": ["Other"],
   "activationEvents": [
     "onStartupFinished",
-    "onCommand:logBuddy.explainLastRun"
+    "onCommand:logBuddy.explainLastRun",
+    "onCommand:logBuddy.visualizeLastRun"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -21,8 +22,48 @@
       {
         "command": "logBuddy.explainLastRun",
         "title": "LogBuddy: Explain Last Terminal Run"
+      },
+      {
+        "command": "logBuddy.visualizeLastRun",
+        "title": "LogBuddy: Visualize Last Terminal Run"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "LogBuddy",
+      "properties": {
+        "logBuddy.provider": {
+          "type": "string",
+          "enum": ["openai", "gemini", "host"],
+          "default": "openai",
+          "description": "LLM provider: 'openai' (OpenAI API), 'gemini' (Google Gemini API), or 'host' (editor's built-in model, e.g. Cursor's model)."
+        },
+        "logBuddy.openai.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "OpenAI API key. Used when provider is 'openai'. Set in Settings (Ctrl+,), not in package.json."
+        },
+        "logBuddy.openai.model": {
+          "type": "string",
+          "default": "gpt-4o-mini",
+          "description": "OpenAI model (e.g. gpt-4o-mini, gpt-4o). Used when provider is 'openai'."
+        },
+        "logBuddy.gemini.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Google AI (Gemini) API key from https://aistudio.google.com/app/apikey . Used when provider is 'gemini'."
+        },
+        "logBuddy.gemini.model": {
+          "type": "string",
+          "default": "gemini-2.5-flash",
+          "description": "Gemini model (e.g. gemini-2.5-flash, gemini-2.5-pro, gemini-2.0-flash). Used when provider is 'gemini'."
+        },
+        "logBuddy.useLLM": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use an LLM for explanations when possible. When false, use built-in heuristics only."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
