@@ -74,6 +74,15 @@ export function activate(context: vscode.ExtensionContext) {
 
       channel.appendLine(explanation);
 
+      // Show formatted explanation in a Webview (Markdown → bold, lists, etc.)
+      const explainPanel = vscode.window.createWebviewPanel(
+        'logBuddyExplain',
+        'LogBuddy: Explanation',
+        vscode.ViewColumn.Beside,
+        { enableScripts: true }
+      );
+      explainPanel.webview.html = getExplanationWebviewHtml(explainPanel.webview, explanation);
+
       // Short summary back into the terminal
       active.sendText(`# LogBuddy summary: ${summarize(explanation)}`);
     }
@@ -95,44 +104,76 @@ function extractRelevantChunk(log: string): string {
 type ErrorFlow = {
   errorType?: string;
   errorMessage?: string;
-  frames: { label: string; file?: string; line?: number }[];
+  frames: { label: string; file?: string; line?: number; column?: number }[];
 };
 
 /** Parse log into ordered stack frames and error type/message (for diagram) */
 function parseErrorFlow(log: string): ErrorFlow {
   const lines = log.split(/\r?\n/);
-  const frames: { label: string; file?: string; line?: number }[] = [];
+  const frames: { label: string; file?: string; line?: number; column?: number }[] = [];
   const seen = new Set<string>();
 
   for (const line of lines) {
-    // Node: "at ... (path:line:col)" or "at function (path:line)"
-    const nodeMatch = line.match(/\s*at\s+(?:.*?\s+\()?([^)]+):(\d+):?\d*\)?/);
-    if (nodeMatch) {
-      const path = nodeMatch[1].trim();
-      const lineNum = parseInt(nodeMatch[2], 10);
-      if (lineNum > 0 && !path.includes('node:') && !path.includes('node_modules')) {
+    const raw = line.replace(/\x1b\[[\d;]*m/g, '').replace(/\r$/, '').trim();
+    if (!raw) continue;
+    // Node: "at ... (path:line:col)" or "at ... (path:line)" — extract content in parens then parse path:line[:col]
+    const atParen = raw.match(/at\s+.*?\(([^)]+)\)/);
+    let inner: string | null = atParen ? atParen[1].trim() : null;
+    if (!inner && /\([^)]*\.(?:js|ts|tsx|jsx|mjs|cjs|py|rs|go):\d+(?::\d+)?\)/.test(raw)) {
+      const anyParen = raw.match(/\(([^)]+)\)/g);
+      if (anyParen) {
+        for (const p of anyParen) {
+          const content = p.slice(1, -1);
+          if (content.includes('node:') || content.includes('node_modules')) continue;
+          if (/\.(?:js|ts|tsx|jsx|mjs|cjs|py|rs|go):\d+/.test(content)) {
+            inner = content;
+            break;
+          }
+        }
+      }
+    }
+    if (inner && !inner.includes('node:') && !inner.includes('node_modules')) {
+      const parts = inner.split(':');
+      let path: string;
+      let lineNum: number;
+      let column: number | undefined;
+      if (parts.length >= 3 && /^\d+$/.test(parts[parts.length - 1]) && /^\d+$/.test(parts[parts.length - 2])) {
+        path = parts.slice(0, -2).join(':').trim();
+        lineNum = parseInt(parts[parts.length - 2], 10);
+        column = parseInt(parts[parts.length - 1], 10);
+      } else if (parts.length >= 2 && /^\d+$/.test(parts[parts.length - 1])) {
+        path = parts.slice(0, -1).join(':').trim();
+        lineNum = parseInt(parts[parts.length - 1], 10);
+      } else {
+        path = '';
+        lineNum = 0;
+      }
+      if (path && lineNum > 0) {
         const key = `${path}:${lineNum}`;
         if (!seen.has(key)) {
           seen.add(key);
-          const short = path.split(/[/\\]/).pop() || path;
-          frames.push({ label: `${short}:${lineNum}`, file: path, line: lineNum });
+          const base = (path.split(/[/\\]/).pop() || path).replace(/\.[^.]+$/, '') || path;
+          frames.push({ label: `${base} line ${lineNum}`, file: path, line: lineNum, column });
         }
       }
       continue;
     }
     // Python: File "path", line N
-    const pyMatch = line.match(/File "([^"]+)", line (\d+)/);
+    const pyMatch = raw.match(/File "([^"]+)", line (\d+)/);
     if (pyMatch) {
       const path = pyMatch[1].trim();
       const lineNum = parseInt(pyMatch[2], 10);
       const key = `${path}:${lineNum}`;
       if (!seen.has(key)) {
         seen.add(key);
-        const short = path.split(/[/\\]/).pop() || path;
-        frames.push({ label: `${short}:${lineNum}`, file: path, line: lineNum });
+        const base = (path.split(/[/\\]/).pop() || path).replace(/\.[^.]+$/, '') || path;
+        frames.push({ label: `${base} line ${lineNum}`, file: path, line: lineNum });
       }
     }
   }
+
+  // Stack traces list innermost call first (where error happened); we want Run → entry → ... → failure → Error
+  frames.reverse();
 
   // Find last line that looks like "ErrorType: message" (Node, Python, etc.)
   let errorType: string | undefined;
@@ -151,15 +192,22 @@ function parseErrorFlow(log: string): ErrorFlow {
   return { errorType, errorMessage, frames };
 }
 
-/** Build Mermaid flowchart: Start -> frame1 -> frame2 -> ... -> Error */
+/** Build Mermaid flowchart: Start -> frame1 -> ... -> Error (top to bottom). All frames show "fileName line N"; failure frame (last) also shows ", col M" when available. */
 function buildMermaidFlowchart(flow: ErrorFlow): string {
-  const lines: string[] = ['flowchart LR', '  Start([Run])'];
+  const lines: string[] = ['flowchart TB', '  Start([Run])'];
   let prev = 'Start';
   const nodeId = (i: number) => `F${i}`;
-  flow.frames.slice(0, 8).forEach((f, i) => {
+  const frameList = flow.frames.slice(0, 8);
+  const lastIdx = frameList.length - 1;
+  frameList.forEach((f, i) => {
     const id = nodeId(i);
-    const label = f.label.replace(/"/g, "'").replace(/[\[\]()]/g, ' ');
-    lines.push(`  ${id}["${label}"]`);
+    const isFailureFrame = i === lastIdx;
+    let label: string = f.label;
+    if (isFailureFrame && f.column != null) {
+      label = `${f.label}, col ${f.column}`;
+    }
+    const safe = label.replace(/"/g, "'").replace(/[\[\]()]/g, ' ');
+    lines.push(`  ${id}["${safe}"]`);
     lines.push(`  ${prev} --> ${id}`);
     prev = id;
   });
@@ -195,7 +243,7 @@ function getVisualizationHtml(webview: vscode.Webview, mermaidCode: string, erro
 </head>
 <body>
   <h2>Error flow</h2>
-  <p style="color: var(--vscode-descriptionForeground);">Stack frames (left to right) leading to the error.</p>
+  <p style="color: var(--vscode-descriptionForeground);">Stack frames (top to bottom) leading to the error.</p>
   <div id="diagram" class="mermaid">${escaped}</div>
   ${errorType || errorMessage ? `<div class="error-box"><strong>${errorType || 'Error'}</strong>${errorMessage ? ': ' + escapeHtml(errorMessage) : ''}</div>` : ''}
   <script>
@@ -207,6 +255,43 @@ function getVisualizationHtml(webview: vscode.Webview, mermaidCode: string, erro
 
 function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+/** HTML for Webview: render explanation as Markdown (bold, lists, etc.) */
+function getExplanationWebviewHtml(webview: vscode.Webview, markdownContent: string): string {
+  const csp = webview.cspSource;
+  const escaped = markdownContent
+    .replace(/\\/g, '\\\\')
+    .replace(/`/g, '\\`')
+    .replace(/\$/g, '\\$')
+    .replace(/<\/script>/gi, '<\\/script>');
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${csp} https://cdn.jsdelivr.net 'unsafe-inline'; style-src ${csp} https://cdn.jsdelivr.net 'unsafe-inline';">
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    body { font-family: var(--vscode-font-family); padding: 1rem; margin: 0; background: var(--vscode-editor-background); color: var(--vscode-editor-foreground); line-height: 1.5; }
+    #content { max-width: 60em; }
+    #content strong { font-weight: 600; }
+    #content ul, #content ol { margin: 0.5em 0; padding-left: 1.5em; }
+    #content li { margin: 0.25em 0; }
+    #content p { margin: 0.75em 0; }
+    #content code { background: var(--vscode-textBlockQuote-background); padding: 0.2em 0.4em; border-radius: 4px; font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <h2>Explanation</h2>
+  <div id="content"></div>
+  <script>
+    (function() {
+      const md = \`${escaped}\`;
+      document.getElementById('content').innerHTML = marked.parse(md);
+    })();
+  </script>
+</body>
+</html>`;
 }
 
 /** Detect language/tool from log content for better LLM context */
